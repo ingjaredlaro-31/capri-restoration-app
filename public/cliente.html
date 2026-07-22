@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mi Caso - Capri Restoration Services</title>
+<link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">CAPRI <span class="tag">CLIENTE</span></div>
+  <div class="user-info">
+    <button class="logout" onclick="logout()">Salir</button>
+  </div>
+</div>
+
+<div class="container" id="content">
+  <div class="card empty-state">Cargando tu caso...</div>
+</div>
+
+<footer class="credit">Ing. Jared Lara Rodriguez &mdash; Capri Restoration Services</footer>
+
+<script src="/js/api.js"></script>
+<script>
+const user = Session.requireRole("cliente");
+function logout() { Session.clear(); window.location.href = "/index.html"; }
+
+const STEPS = ["reportado", "estimado", "aprobado", "facturado", "pagado"];
+const STEP_LABELS = {
+  reportado: "Reporte recibido",
+  estimado: "Estimado listo",
+  aprobado: "Estimado aprobado",
+  facturado: "Factura generada",
+  pagado: "Pagado",
+};
+
+async function loadClaim() {
+  const params = new URLSearchParams(window.location.search);
+  const folio = params.get("folio") || (user && user.folio);
+  if (!folio) { window.location.href = "/index.html"; return; }
+
+  const [claim, estimates, invoices, logs] = await Promise.all([
+    apiCall("claims", { id: folio }),
+    apiCall("estimates"),
+    apiCall("invoices"),
+    apiCall("logs"),
+  ]);
+  const estimate = estimates.find((e) => e.claim_id === folio);
+  const invoice = invoices.find((i) => i.claim_id === folio);
+  const claimLogs = logs.filter((l) => l.claim_id === folio).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  const currentIdx = STEPS.indexOf(claim.status);
+  const stepsHtml = STEPS.map((s, i) => `
+    <div style="flex:1;text-align:center">
+      <div style="width:26px;height:26px;border-radius:50%;margin:0 auto 6px;
+        background:${i <= currentIdx ? "#e0982b" : "#e6e9eb"};
+        color:${i <= currentIdx ? "#0f2436" : "#9aa5ab"};
+        display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px">${i + 1}</div>
+      <div style="font-size:12px;color:${i <= currentIdx ? "#0f2436" : "#9aa5ab"}">${STEP_LABELS[s]}</div>
+    </div>
+  `).join("");
+
+  let estimateHtml = "<p>Tu estimado esta en preparacion. Te avisaremos cuando este listo.</p>";
+  if (estimate) {
+    const rows = estimate.items.map((i) => `<tr><td>${i.desc}</td><td>${i.qty}</td><td>${money(i.price)}</td><td>${money(i.total)}</td></tr>`).join("");
+    estimateHtml = `
+      <table><thead><tr><th>Descripcion</th><th>Cant.</th><th>Precio</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="totals">Subtotal: ${money(estimate.subtotal)}<br>Impuesto: ${money(estimate.tax)}<br><span class="grand">Total: ${money(estimate.total)}</span></div>
+    `;
+  }
+
+  let invoiceHtml = "";
+  if (invoice) {
+    invoiceHtml = `
+      <div class="card">
+        <h2 style="margin-top:0">Factura ${invoice.folio}</h2>
+        <p>Total: <strong>${money(invoice.total)}</strong></p>
+        <span class="badge ${invoice.paid_status}">${invoice.paid_status}</span>
+        ${invoice.paid_status !== "pagado" ? `<p style="margin-top:12px;color:#6b7c88;font-size:13px">Contacta a la oficina de Capri para completar tu pago.</p>` : ""}
+      </div>
+    `;
+  }
+
+  document.getElementById("content").innerHTML = `
+    <div class="card">
+      <h2 style="margin-top:0">${claim.folio}</h2>
+      <div style="display:flex;justify-content:space-between;margin:20px 0">${stepsHtml}</div>
+      <div class="grid-2">
+        <div><strong>Direccion:</strong> ${claim.address}</div>
+        <div><strong>Tipo de dano:</strong> ${claim.category}</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Diario del trabajo</h2>
+      ${claimLogs.length ? claimLogs.map((l) => `
+        <div style="border-left:3px solid #e0982b;padding:8px 12px;margin-top:10px;background:#faf8f3;border-radius:0 6px 6px 0">
+          <div style="font-size:12px;color:#6b7c88">${new Date(l.created_at).toLocaleString()} &mdash; ${l.author}</div>
+          <div style="margin-top:4px">${l.note}</div>
+          ${(l.photos || []).length ? `<div class="photo-grid">${l.photos.map((p) => `<img src="${p}">`).join("")}</div>` : ""}
+        </div>`).join("") : `<p style="color:#6b7c88">Aun no hay actualizaciones registradas.</p>`}
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Estimado</h2>
+      ${estimateHtml}
+    </div>
+    ${invoiceHtml}
+  `;
+}
+
+loadClaim();
+</script>
+</body>
+</html>

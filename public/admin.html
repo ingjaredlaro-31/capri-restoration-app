@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Panel de Oficina - Capri</title>
+<link rel="stylesheet" href="/css/styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">CAPRI <span class="tag" id="roleTag">OFICINA</span></div>
+  <div class="user-info">
+    <span id="userName"></span>
+    <button class="logout" onclick="logout()">Salir</button>
+  </div>
+</div>
+
+<div class="container">
+  <div class="summary-strip" id="summaryStrip"></div>
+
+  <div style="display:flex;gap:10px;margin-bottom:16px">
+    <button class="btn secondary small" id="tabListBtn" onclick="showTab('list')">Lista de casos</button>
+    <button class="btn secondary small" id="tabCalBtn" onclick="showTab('calendar')">Calendario</button>
+  </div>
+
+  <div class="card" id="listView">
+    <h2 style="margin-top:0">Todos los casos</h2>
+    <table id="claimsTable">
+      <thead><tr><th>Folio</th><th>Cliente</th><th>Direccion</th><th>Tecnico</th><th>Status</th><th>Fecha</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="emptyClaims" class="empty-state" style="display:none">No hay casos registrados todavia.</div>
+  </div>
+
+  <div class="card" id="calendarView" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <button class="btn secondary small" onclick="shiftMonth(-1)">&larr; Mes anterior</button>
+      <h2 id="calTitle" style="margin:0"></h2>
+      <button class="btn secondary small" onclick="shiftMonth(1)">Mes siguiente &rarr;</button>
+    </div>
+    <div id="calGrid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:16px"></div>
+  </div>
+
+  <div class="card" id="detailView" style="display:none">
+    <button class="btn secondary small" onclick="backToList()">&larr; Volver</button>
+    <div id="detailContent"></div>
+  </div>
+</div>
+
+<footer class="credit">Ing. Jared Lara Rodriguez &mdash; Capri Restoration Services</footer>
+
+<script src="/js/api.js"></script>
+<script>
+const user = Session.requireAnyRole(["admin", "secretaria"]);
+const isAdmin = user && user.role === "admin";
+if (user) {
+  document.getElementById("userName").textContent = user.name;
+  document.getElementById("roleTag").textContent = isAdmin ? "ADMIN" : "SECRETARIA";
+}
+function logout() { Session.clear(); window.location.href = "/index.html"; }
+
+let allClaims = [], allReports = [], allEstimates = [], allInvoices = [], allLogs = [], catalog = [];
+
+async function loadAll() {
+  [allClaims, allReports, allEstimates, allInvoices, allLogs, catalog] = await Promise.all([
+    apiCall("claims"), apiCall("reports"), apiCall("estimates"), apiCall("invoices"), apiCall("logs"), apiCall("catalog"),
+  ]);
+  renderSummary();
+  renderList();
+  renderCalendar();
+}
+
+function showTab(tab) {
+  document.getElementById("listView").style.display = tab === "list" ? "block" : "none";
+  document.getElementById("calendarView").style.display = tab === "calendar" ? "block" : "none";
+  document.getElementById("detailView").style.display = "none";
+  document.getElementById("tabListBtn").classList.toggle("active", tab === "list");
+  document.getElementById("tabCalBtn").classList.toggle("active", tab === "calendar");
+}
+
+function renderSummary() {
+  const counts = { reportado: 0, estimado: 0, aprobado: 0, facturado: 0, pagado: 0 };
+  allClaims.forEach((c) => { if (counts[c.status] !== undefined) counts[c.status]++; });
+  const revenue = allInvoices.filter(i => i.paid_status === "pagado").reduce((s, i) => s + (i.total || 0), 0);
+  document.getElementById("summaryStrip").innerHTML = `
+    <div class="summary-box"><div class="num">${allClaims.length}</div><div class="lbl">Casos totales</div></div>
+    <div class="summary-box"><div class="num">${counts.reportado}</div><div class="lbl">Por estimar</div></div>
+    <div class="summary-box"><div class="num">${counts.aprobado}</div><div class="lbl">Aprobados</div></div>
+    <div class="summary-box"><div class="num">${money(revenue)}</div><div class="lbl">Cobrado</div></div>
+  `;
+}
+
+function renderList() {
+  const tbody = document.querySelector("#claimsTable tbody");
+  tbody.innerHTML = "";
+  const sorted = [...allClaims].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  document.getElementById("emptyClaims").style.display = sorted.length ? "none" : "block";
+  sorted.forEach((c) => {
+    const tr = document.createElement("tr");
+    tr.className = "claim-row";
+    tr.innerHTML = `<td>${c.folio}</td><td>${c.client_name}</td><td>${c.address}</td>
+      <td>${c.technician || "-"}</td><td><span class="badge ${c.status}">${c.status}</span></td>
+      <td>${new Date(c.created_at).toLocaleDateString()}</td>`;
+    tr.addEventListener("click", () => openDetail(c.id));
+    tbody.appendChild(tr);
+  });
+}
+
+function backToList() {
+  document.getElementById("detailView").style.display = "none";
+  document.getElementById("listView").style.display = "block";
+}
+
+// ---- Calendario ----
+let calDate = new Date();
+const MONTH_NAMES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const DAY_NAMES = ["Dom","Lun","Mar","Mie","Jue","Vie","Sab"];
+
+function shiftMonth(delta) {
+  calDate = new Date(calDate.getFullYear(), calDate.getMonth() + delta, 1);
+  renderCalendar();
+}
+
+function activityByDay() {
+  // Junta actividad de cada dia: creacion de casos + entradas de bitacora
+  const map = {};
+  const add = (dateStr, claimId, label) => {
+    const key = dateStr.slice(0, 10);
+    if (!map[key]) map[key] = [];
+    map[key].push({ claimId, label });
+  };
+  allClaims.forEach((c) => add(c.created_at, c.id, `Nuevo caso: ${c.folio}`));
+  allLogs.forEach((l) => add(l.created_at, l.claim_id, `Actualizacion: ${(allClaims.find(c=>c.id===l.claim_id)||{}).folio || l.claim_id}`));
+  return map;
+}
+
+function renderCalendar() {
+  const grid = document.getElementById("calGrid");
+  const title = document.getElementById("calTitle");
+  if (!grid || !title) return;
+  title.textContent = `${MONTH_NAMES[calDate.getMonth()]} ${calDate.getFullYear()}`;
+  grid.innerHTML = "";
+  DAY_NAMES.forEach((d) => {
+    const el = document.createElement("div");
+    el.style.cssText = "text-align:center;font-size:11px;font-weight:700;color:#6b7c88;padding:4px";
+    el.textContent = d;
+    grid.appendChild(el);
+  });
+
+  const firstDay = new Date(calDate.getFullYear(), calDate.getMonth(), 1);
+  const startOffset = firstDay.getDay();
+  const daysInMonth = new Date(calDate.getFullYear(), calDate.getMonth() + 1, 0).getDate();
+  const activity = activityByDay();
+
+  for (let i = 0; i < startOffset; i++) grid.appendChild(document.createElement("div"));
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateObj = new Date(calDate.getFullYear(), calDate.getMonth(), day);
+    const key = dateObj.toISOString().slice(0, 10);
+    const items = activity[key] || [];
+    const cell = document.createElement("div");
+    cell.style.cssText = "min-height:70px;border:1px solid #eceef0;border-radius:6px;padding:6px;font-size:11px;background:#fff";
+    let itemsHtml = items.slice(0, 3).map((it) =>
+      `<div style="cursor:pointer;color:#0f2436;background:#fdf1dc;border-radius:4px;padding:2px 4px;margin-top:2px" onclick="openDetail('${it.claimId}')">${it.label}</div>`
+    ).join("");
+    if (items.length > 3) itemsHtml += `<div style="color:#6b7c88;margin-top:2px">+${items.length - 3} mas</div>`;
+    cell.innerHTML = `<div style="font-weight:700;color:#0f2436">${day}</div>${itemsHtml}`;
+    grid.appendChild(cell);
+  }
+}
+
+async function openDetail(claimId) {
+  document.getElementById("listView").style.display = "none";
+  document.getElementById("calendarView").style.display = "none";
+  document.getElementById("detailView").style.display = "block";
+  const claim = allClaims.find((c) => c.id === claimId);
+  const report = allReports.find((r) => r.claim_id === claimId);
+  let estimate = allEstimates.find((e) => e.claim_id === claimId);
+  let invoice = allInvoices.find((i) => i.claim_id === claimId);
+
+  const photosHtml = (report?.photos || []).map((p) => `<img src="${p}">`).join("");
+
+  let estimateSectionHtml = "";
+  if (!estimate) {
+    estimateSectionHtml = `
+      <h3>Armar estimado</h3>
+      <div id="lineItems"></div>
+      <button class="btn secondary small" type="button" onclick="addLine()">+ Agregar linea</button>
+      <div class="totals" id="estTotals"></div>
+      <button class="btn" onclick="saveEstimate('${claimId}')">Guardar estimado</button>
+    `;
+  } else {
+    estimateSectionHtml = renderEstimateView(estimate, invoice);
+  }
+
+  const claimLogs = allLogs.filter((l) => l.claim_id === claimId).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const logsHtml = claimLogs.length
+    ? claimLogs.map((l) => `
+        <div style="border-left:3px solid #e0982b;padding:8px 12px;margin-top:10px;background:#faf8f3;border-radius:0 6px 6px 0">
+          <div style="font-size:12px;color:#6b7c88">${new Date(l.created_at).toLocaleString()} &mdash; ${l.author}</div>
+          <div style="margin-top:4px">${l.note}</div>
+          ${(l.photos || []).length ? `<div class="photo-grid">${l.photos.map((p) => `<img src="${p}">`).join("")}</div>` : ""}
+        </div>`).join("")
+    : `<p style="color:#6b7c88">Sin actualizaciones todavia.</p>`;
+
+  document.getElementById("detailContent").innerHTML = `
+    <h2 style="margin-top:10px">${claim.folio} <span class="badge ${claim.status}">${claim.status}</span></h2>
+    <div class="grid-2">
+      <div><strong>Cliente:</strong> ${claim.client_name}<br><strong>Telefono:</strong> ${claim.client_phone}</div>
+      <div><strong>Direccion:</strong> ${claim.address}<br><strong>Tecnico:</strong> ${claim.technician || "-"}</div>
+    </div>
+    <div class="grid-2" style="margin-top:10px">
+      <div><strong>Tipo de dano:</strong> ${claim.category}</div>
+      <div><strong>Categoria de agua:</strong> ${claim.water_category || "-"}</div>
+    </div>
+    <h3>Reporte inicial del tecnico</h3>
+    <p>${report ? report.description : "Sin reporte registrado."}</p>
+    <div class="photo-grid">${photosHtml || "<em>Sin fotos</em>"}</div>
+
+    <hr style="margin:20px 0;border:none;border-top:1px solid #eee">
+    <h3>Bitacora diaria de avance</h3>
+    <textarea id="logNote" placeholder="Actualizacion de hoy: que se hizo, en que va el trabajo..."></textarea>
+    <input type="file" id="logPhotos" accept="image/*" multiple capture="environment" style="margin-top:8px">
+    <div class="photo-grid" id="logPhotoPreview"></div>
+    <button class="btn secondary small" style="margin-top:10px" onclick="addLogEntry('${claimId}')">Agregar entrada a la bitacora</button>
+    <div id="logsContainer">${logsHtml}</div>
+
+    <hr style="margin:20px 0;border:none;border-top:1px solid #eee">
+    ${estimateSectionHtml}
+  `;
+
+  if (!estimate) {
+    lineCounter = 0;
+    lines = [];
+    addLine();
+  }
+
+  logPhotosSelected = [];
+  const logPhotosInput = document.getElementById("logPhotos");
+  if (logPhotosInput) {
+    logPhotosInput.addEventListener("change", async (e) => {
+      const files = Array.from(e.target.files);
+      const preview = document.getElementById("logPhotoPreview");
+      for (const file of files) {
+        const dataUrl = await compressImage(file);
+        logPhotosSelected.push(dataUrl);
+        const img = document.createElement("img");
+        img.src = dataUrl;
+        preview.appendChild(img);
+      }
+    });
+  }
+}
+
+let logPhotosSelected = [];
+async function addLogEntry(claimId) {
+  const note = document.getElementById("logNote").value.trim();
+  if (!note) { alert("Escribe una nota de avance."); return; }
+  await apiCall("logs", {
+    method: "POST",
+    body: { claim_id: claimId, author: user.name, note, photos: logPhotosSelected },
+  });
+  logPhotosSelected = [];
+  await loadAll();
+  openDetail(claimId);
+}
+
+// ---- Estimado ----
+let lines = [];
+let lineCounter = 0;
+
+function addLine() {
+  const idx = lineCounter++;
+  lines.push({ idx, desc: "", qty: 1, price: 0 });
+  const container = document.getElementById("lineItems");
+  const row = document.createElement("div");
+  row.className = "line-item";
+  row.id = `line-${idx}`;
+  const options = catalog.map((c) => `<option value="${c.desc}" data-price="${c.price}">${c.desc} (${money(c.price)}/${c.unit})</option>`).join("");
+  row.innerHTML = `
+    <select onchange="fillFromCatalog(${idx}, this)">
+      <option value="">-- elegir del catalogo o escribir abajo --</option>
+      ${options}
+    </select>
+    <input type="text" placeholder="Descripcion" oninput="updateLine(${idx}, 'desc', this.value)">
+    <input type="number" placeholder="Cant." value="1" min="0" step="0.01" oninput="updateLine(${idx}, 'qty', this.value)">
+    <input type="number" placeholder="Precio" value="0" min="0" step="0.01" oninput="updateLine(${idx}, 'price', this.value)">
+    <button type="button" class="btn danger small" onclick="removeLine(${idx})">X</button>
+  `;
+  container.appendChild(row);
+  updateTotals();
+}
+
+function fillFromCatalog(idx, sel) {
+  const opt = sel.options[sel.selectedIndex];
+  const price = opt.dataset.price || 0;
+  const row = document.getElementById(`line-${idx}`);
+  const inputs = row.querySelectorAll("input");
+  inputs[0].value = opt.value;
+  inputs[2].value = price;
+  updateLine(idx, "desc", opt.value);
+  updateLine(idx, "price", price);
+}
+
+function updateLine(idx, field, value) {
+  const line = lines.find((l) => l.idx === idx);
+  if (line) line[field] = field === "desc" ? value : parseFloat(value) || 0;
+  updateTotals();
+}
+
+function removeLine(idx) {
+  lines = lines.filter((l) => l.idx !== idx);
+  document.getElementById(`line-${idx}`).remove();
+  updateTotals();
+}
+
+function updateTotals() {
+  const subtotal = lines.reduce((s, l) => s + (l.qty * l.price), 0);
+  const tax = subtotal * 0.0825;
+  const total = subtotal + tax;
+  const totalsEl = document.getElementById("estTotals");
+  if (totalsEl) {
+    totalsEl.innerHTML = `Subtotal: ${money(subtotal)}<br>Impuesto (8.25%): ${money(tax)}<br><span class="grand">Total: ${money(total)}</span>`;
+  }
+}
+
+async function saveEstimate(claimId) {
+  const subtotal = lines.reduce((s, l) => s + (l.qty * l.price), 0);
+  const tax = subtotal * 0.0825;
+  const total = subtotal + tax;
+  const estimate = {
+    claim_id: claimId,
+    items: lines.map((l) => ({ desc: l.desc, qty: l.qty, price: l.price, total: l.qty * l.price })),
+    subtotal, tax, total,
+    status: "pendiente",
+  };
+  await apiCall("estimates", { method: "POST", body: estimate });
+  await apiCall("claims", { id: claimId, method: "PUT", body: { status: "estimado" } });
+  await loadAll();
+  openDetail(claimId);
+}
+
+function renderEstimateView(estimate, invoice) {
+  const rows = estimate.items.map((i) => `<tr><td>${i.desc}</td><td>${i.qty}</td><td>${money(i.price)}</td><td>${money(i.total)}</td></tr>`).join("");
+  let actionsHtml = "";
+  if (!isAdmin) {
+    actionsHtml = `<p style="color:#6b7c88;font-size:13px">Solo el Admin puede aprobar, facturar o marcar pagos. Status actual: <span class="badge ${estimate.status}">${estimate.status}</span></p>`;
+    if (invoice) actionsHtml += `<button class="btn secondary" onclick="downloadInvoicePdf('${invoice.id}')">Descargar PDF de factura</button>`;
+  } else if (estimate.status === "pendiente") {
+    actionsHtml = `<button class="btn" onclick="approveEstimate('${estimate.id}', '${estimate.claim_id}')">Marcar como aprobado por cliente</button>`;
+  } else if (!invoice) {
+    actionsHtml = `<button class="btn" onclick="generateInvoice('${estimate.id}', '${estimate.claim_id}')">Generar factura (PDF)</button>`;
+  } else {
+    actionsHtml = `
+      <button class="btn secondary" onclick="downloadInvoicePdf('${invoice.id}')">Descargar PDF de factura</button>
+      <button class="btn secondary" onclick="exportQuickBooksIIF('${invoice.id}')">Exportar a QuickBooks (IIF)</button>
+      ${invoice.paid_status !== "pagado" ? `<button class="btn" onclick="markPaid('${invoice.id}', '${estimate.claim_id}')">Marcar como pagado</button>` : `<span class="badge pagado">Pagado</span>`}
+    `;
+  }
+  return `
+    <h3>Estimado</h3>
+    <table><thead><tr><th>Descripcion</th><th>Cant.</th><th>Precio</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="totals">Subtotal: ${money(estimate.subtotal)}<br>Impuesto: ${money(estimate.tax)}<br><span class="grand">Total: ${money(estimate.total)}</span></div>
+    <div style="margin-top:14px">${actionsHtml}</div>
+    ${invoice ? `<p style="margin-top:10px;color:#6b7c88;font-size:13px">Factura: ${invoice.folio}</p>` : ""}
+  `;
+}
+
+async function approveEstimate(estimateId, claimId) {
+  await apiCall("estimates", { id: estimateId, method: "PUT", body: { status: "aprobado" } });
+  await apiCall("claims", { id: claimId, method: "PUT", body: { status: "aprobado" } });
+  await loadAll();
+  openDetail(claimId);
+}
+
+async function generateInvoice(estimateId, claimId) {
+  const estimate = allEstimates.find((e) => e.id === estimateId) || (await apiCall("estimates", { id: estimateId }));
+  const claim = allClaims.find((c) => c.id === claimId);
+  const folio = `INV-${claim.folio.replace("CAPRI-", "")}`;
+  const invoice = {
+    id: folio,
+    folio,
+    claim_id: claimId,
+    estimate_id: estimateId,
+    total: estimate.total,
+    paid_status: "pendiente",
+    payment_method: null,
+  };
+  await apiCall("invoices", { method: "POST", body: invoice });
+  await apiCall("claims", { id: claimId, method: "PUT", body: { status: "facturado" } });
+  await loadAll();
+  openDetail(claimId);
+}
+
+async function markPaid(invoiceId, claimId) {
+  const method = prompt("Metodo de pago (efectivo, cheque, tarjeta, transferencia):", "tarjeta") || "otro";
+  await apiCall("invoices", { id: invoiceId, method: "PUT", body: { paid_status: "pagado", payment_method: method, paid_at: new Date().toISOString() } });
+  await apiCall("claims", { id: claimId, method: "PUT", body: { status: "pagado" } });
+  await loadAll();
+  openDetail(claimId);
+}
+
+async function downloadInvoicePdf(invoiceId) {
+  const invoice = allInvoices.find((i) => i.id === invoiceId);
+  const estimate = allEstimates.find((e) => e.id === invoice.estimate_id);
+  const claim = allClaims.find((c) => c.id === invoice.claim_id);
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(18); doc.text("CAPRI RESTORATION SERVICES", 14, 20);
+  doc.setFontSize(10); doc.text("Flood Service & Water Damage - Chula Vista, CA", 14, 26);
+  doc.setFontSize(14); doc.text(`Factura ${invoice.folio}`, 14, 40);
+  doc.setFontSize(10);
+  doc.text(`Folio de caso: ${claim.folio}`, 14, 48);
+  doc.text(`Cliente: ${claim.client_name}`, 14, 54);
+  doc.text(`Direccion: ${claim.address}`, 14, 60);
+  doc.text(`Fecha: ${new Date(invoice.created_at || Date.now()).toLocaleDateString()}`, 14, 66);
+
+  let y = 80;
+  doc.setFont(undefined, "bold");
+  doc.text("Descripcion", 14, y); doc.text("Cant.", 120, y); doc.text("Precio", 145, y); doc.text("Total", 175, y);
+  doc.setFont(undefined, "normal");
+  y += 6;
+  estimate.items.forEach((item) => {
+    doc.text(String(item.desc).slice(0, 55), 14, y);
+    doc.text(String(item.qty), 120, y);
+    doc.text(`$${item.price.toFixed(2)}`, 145, y);
+    doc.text(`$${item.total.toFixed(2)}`, 175, y);
+    y += 7;
+  });
+  y += 4;
+  doc.line(14, y, 196, y); y += 8;
+  doc.text(`Subtotal: $${estimate.subtotal.toFixed(2)}`, 145, y); y += 6;
+  doc.text(`Impuesto: $${estimate.tax.toFixed(2)}`, 145, y); y += 6;
+  doc.setFont(undefined, "bold");
+  doc.text(`Total: $${estimate.total.toFixed(2)}`, 145, y); y += 6;
+  doc.setFont(undefined, "normal");
+  doc.text(`Status de pago: ${invoice.paid_status}`, 14, y + 10);
+
+  doc.setFontSize(8);
+  doc.text("Ing. Jared Lara Rodriguez - Capri Restoration Services", 14, 285);
+
+  doc.save(`${invoice.folio}.pdf`);
+}
+
+function exportQuickBooksIIF(invoiceId) {
+  const invoice = allInvoices.find((i) => i.id === invoiceId);
+  const estimate = allEstimates.find((e) => e.id === invoice.estimate_id);
+  const claim = allClaims.find((c) => c.id === invoice.claim_id);
+  const d = new Date(invoice.created_at || Date.now());
+  const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+
+  let iif = "!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\n";
+  iif += "!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO\n";
+  iif += "!ENDTRNS\n";
+  iif += `TRNS\t\tINVOICE\t${dateStr}\tAccounts Receivable\t${claim.client_name}\t${estimate.total.toFixed(2)}\t${invoice.folio}\t${claim.address}\n`;
+  estimate.items.forEach((item) => {
+    iif += `SPL\t\tINVOICE\t${dateStr}\tRestoration Services Income\t${claim.client_name}\t${(-item.total).toFixed(2)}\t${item.desc}\n`;
+  });
+  iif += "ENDTRNS\n";
+
+  const blob = new Blob([iif], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${invoice.folio}.iif`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+showTab('list');
+loadAll();
+</script>
+</body>
+</html>

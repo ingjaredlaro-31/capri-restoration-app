@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reporte de Campo - Capri</title>
+<link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">CAPRI <span class="tag">TECNICO</span></div>
+  <div class="user-info">
+    <span id="userName"></span>
+    <button class="logout" onclick="logout()">Salir</button>
+  </div>
+</div>
+
+<div class="container">
+  <div class="card">
+    <h2 style="margin-top:0">Nuevo reporte de dano</h2>
+    <form id="reportForm">
+      <div class="grid-2">
+        <div>
+          <label>Nombre del cliente</label>
+          <input type="text" id="client_name" required>
+        </div>
+        <div>
+          <label>Telefono del cliente</label>
+          <input type="tel" id="client_phone" required>
+        </div>
+      </div>
+      <label>Direccion del servicio</label>
+      <input type="text" id="address" required>
+
+      <div class="grid-2">
+        <div>
+          <label>Tipo de dano</label>
+          <select id="category" required>
+            <option value="Flood / Inundacion">Flood / Inundacion</option>
+            <option value="Water Damage - Pipe Break">Water Damage - Pipe Break</option>
+            <option value="Water Damage - Roof Leak">Water Damage - Roof Leak</option>
+            <option value="Water Damage - Appliance">Water Damage - Appliance</option>
+            <option value="Mold / Moho">Mold / Moho</option>
+            <option value="Otro">Otro</option>
+          </select>
+        </div>
+        <div>
+          <label>Categoria de agua (IICRC)</label>
+          <select id="water_category">
+            <option value="Categoria 1 - Limpia">Categoria 1 - Limpia</option>
+            <option value="Categoria 2 - Gris">Categoria 2 - Gris</option>
+            <option value="Categoria 3 - Negra">Categoria 3 - Negra</option>
+          </select>
+        </div>
+      </div>
+
+      <label>Descripcion del dano observado</label>
+      <textarea id="description" required placeholder="Areas afectadas, materiales danados, nivel de humedad, etc."></textarea>
+
+      <label>Fotos de evidencia</label>
+      <input type="file" id="photos" accept="image/*" multiple capture="environment">
+      <div class="photo-grid" id="photoPreview"></div>
+
+      <button class="btn" type="submit" id="submitBtn">Enviar reporte</button>
+      <div id="msg"></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Subir avance diario a un caso</h2>
+    <label>Selecciona el caso</label>
+    <select id="logClaimSelect"><option value="">-- elegir caso --</option></select>
+    <label>Actualizacion de hoy</label>
+    <textarea id="logNote" placeholder="Que se hizo hoy, en que va el trabajo, materiales secandose, etc."></textarea>
+    <label>Fotos del avance</label>
+    <input type="file" id="logPhotos" accept="image/*" multiple capture="environment">
+    <div class="photo-grid" id="logPhotoPreview"></div>
+    <button class="btn" id="logBtn" onclick="submitLog()">Agregar a la bitacora</button>
+    <div id="logMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Mis reportes recientes</h2>
+    <table id="myReportsTable">
+      <thead><tr><th>Folio</th><th>Cliente</th><th>Direccion</th><th>Status</th><th>Fecha</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="emptyReports" class="empty-state" style="display:none">Aun no has enviado reportes.</div>
+  </div>
+</div>
+
+<footer class="credit">Ing. Jared Lara Rodriguez &mdash; Capri Restoration Services</footer>
+
+<script src="/js/api.js"></script>
+<script>
+const user = Session.requireRole("tecnico");
+if (user) document.getElementById("userName").textContent = user.name;
+
+function logout() { Session.clear(); window.location.href = "/index.html"; }
+
+let selectedPhotos = [];
+document.getElementById("photos").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files);
+  const preview = document.getElementById("photoPreview");
+  for (const file of files) {
+    const dataUrl = await compressImage(file);
+    selectedPhotos.push(dataUrl);
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    preview.appendChild(img);
+  }
+});
+
+document.getElementById("reportForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("submitBtn");
+  const msg = document.getElementById("msg");
+  btn.disabled = true;
+  btn.textContent = "Enviando...";
+  try {
+    const folio = genFolio();
+    const claim = {
+      id: folio,
+      folio,
+      client_name: document.getElementById("client_name").value,
+      client_phone: document.getElementById("client_phone").value,
+      address: document.getElementById("address").value,
+      category: document.getElementById("category").value,
+      water_category: document.getElementById("water_category").value,
+      status: "reportado",
+      technician: user.name,
+    };
+    await apiCall("claims", { method: "POST", body: claim });
+
+    await apiCall("reports", {
+      method: "POST",
+      body: {
+        claim_id: folio,
+        technician: user.name,
+        description: document.getElementById("description").value,
+        photos: selectedPhotos,
+      },
+    });
+
+    msg.innerHTML = `<div class="msg ok">Reporte enviado. Folio: <strong>${folio}</strong></div>`;
+    document.getElementById("reportForm").reset();
+    document.getElementById("photoPreview").innerHTML = "";
+    selectedPhotos = [];
+    loadMyReports();
+  } catch (err) {
+    msg.innerHTML = `<div class="msg error">${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar reporte";
+  }
+});
+
+let myClaims = [];
+async function loadMyReports() {
+  const claims = await apiCall("claims");
+  myClaims = claims
+    .filter((c) => c.technician === user.name)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const tbody = document.querySelector("#myReportsTable tbody");
+  tbody.innerHTML = "";
+  document.getElementById("emptyReports").style.display = myClaims.length ? "none" : "block";
+  myClaims.forEach((c) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${c.folio}</td><td>${c.client_name}</td><td>${c.address}</td>
+      <td><span class="badge ${c.status}">${c.status}</span></td>
+      <td>${new Date(c.created_at).toLocaleDateString()}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const select = document.getElementById("logClaimSelect");
+  select.innerHTML = '<option value="">-- elegir caso --</option>' +
+    myClaims.map((c) => `<option value="${c.id}">${c.folio} - ${c.client_name}</option>`).join("");
+}
+loadMyReports();
+
+let logPhotosSelected = [];
+document.getElementById("logPhotos").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files);
+  const preview = document.getElementById("logPhotoPreview");
+  for (const file of files) {
+    const dataUrl = await compressImage(file);
+    logPhotosSelected.push(dataUrl);
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    preview.appendChild(img);
+  }
+});
+
+async function submitLog() {
+  const claimId = document.getElementById("logClaimSelect").value;
+  const note = document.getElementById("logNote").value.trim();
+  const msg = document.getElementById("logMsg");
+  if (!claimId) { msg.innerHTML = `<div class="msg error">Elige un caso.</div>`; return; }
+  if (!note) { msg.innerHTML = `<div class="msg error">Escribe una nota de avance.</div>`; return; }
+  const btn = document.getElementById("logBtn");
+  btn.disabled = true;
+  try {
+    await apiCall("logs", {
+      method: "POST",
+      body: { claim_id: claimId, author: user.name, note, photos: logPhotosSelected },
+    });
+    msg.innerHTML = `<div class="msg ok">Actualizacion agregada a la bitacora.</div>`;
+    document.getElementById("logNote").value = "";
+    document.getElementById("logPhotoPreview").innerHTML = "";
+    logPhotosSelected = [];
+  } catch (err) {
+    msg.innerHTML = `<div class="msg error">${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

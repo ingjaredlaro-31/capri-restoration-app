@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Capri Restoration Services - Control de Proyectos</title>
+<link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <h1>CAPRI</h1>
+    <div class="sub">Restoration Services &mdash; Flood &amp; Water Damage</div>
+
+    <div class="role-tabs">
+      <button type="button" class="active" data-role="tecnico">Tecnico</button>
+      <button type="button" data-role="admin">Admin</button>
+      <button type="button" data-role="secretaria">Secretaria</button>
+      <button type="button" data-role="cliente">Cliente</button>
+    </div>
+
+    <form id="staffForm">
+      <label>Usuario</label>
+      <input type="text" id="username" autocomplete="username" required>
+      <label>Contrasena</label>
+      <input type="password" id="password" autocomplete="current-password" required>
+      <button class="btn" type="submit" style="width:100%">Entrar</button>
+    </form>
+
+    <form id="clientForm" style="display:none">
+      <label>Numero de folio</label>
+      <input type="text" id="folio" placeholder="CAPRI-20260722-123" required>
+      <label>Ultimos 4 digitos de tu telefono</label>
+      <input type="text" id="phoneLast4" maxlength="4" required>
+      <button class="btn" type="submit" style="width:100%">Ver mi caso</button>
+    </form>
+
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+let currentRole = "tecnico";
+const tabs = document.querySelectorAll(".role-tabs button");
+const staffForm = document.getElementById("staffForm");
+const clientForm = document.getElementById("clientForm");
+const msg = document.getElementById("msg");
+
+tabs.forEach(tab => tab.addEventListener("click", () => {
+  tabs.forEach(t => t.classList.remove("active"));
+  tab.classList.add("active");
+  currentRole = tab.dataset.role;
+  msg.innerHTML = "";
+  if (currentRole === "cliente") {
+    staffForm.style.display = "none";
+    clientForm.style.display = "block";
+  } else {
+    staffForm.style.display = "block";
+    clientForm.style.display = "none";
+  }
+}));
+
+staffForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  msg.innerHTML = "";
+  const username = document.getElementById("username").value.trim();
+  const password = document.getElementById("password").value;
+  try {
+    const user = await apiCall("users", { action: "login", method: "POST", body: { username, password } });
+    if (user.role !== currentRole) {
+      msg.innerHTML = `<div class="msg error">Ese usuario no tiene el rol "${currentRole}".</div>`;
+      return;
+    }
+    Session.save(user);
+    if (user.role === "admin" || user.role === "secretaria") {
+      window.location.href = "/admin.html";
+    } else {
+      window.location.href = "/tecnico.html";
+    }
+  } catch (err) {
+    msg.innerHTML = `<div class="msg error">${err.message}</div>`;
+  }
+});
+
+clientForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  msg.innerHTML = "";
+  const folio = document.getElementById("folio").value.trim();
+  const phoneLast4 = document.getElementById("phoneLast4").value.trim();
+  try {
+    const claim = await apiCall("claims", { action: "client-login", method: "POST", body: { folio, phoneLast4 } });
+    Session.save({ role: "cliente", folio: claim.id, name: claim.client_name });
+    window.location.href = `/cliente.html?folio=${encodeURIComponent(claim.id)}`;
+  } catch (err) {
+    msg.innerHTML = `<div class="msg error">${err.message}</div>`;
+  }
+});
+</script>
+</body>
+</html>
